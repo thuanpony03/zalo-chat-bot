@@ -10,89 +10,154 @@ import hashlib
 from dotenv import load_dotenv
 from services.zalo_api import ZaloAPI
 from services.message_handler import message_handler
+from datetime import datetime, timedelta
+import redis
 
-# Nạp biến môi trường
 load_dotenv()
 
 app = Flask(__name__)
 zalo_api = ZaloAPI()
 
+# Redis client to track processed messages
+try:
+    redis_client = redis.Redis(host='localhost', port=6379, db=0, socket_connect_timeout=1)
+    # Kiểm tra kết nối
+    redis_client.ping()
+    print("Redis connected successfully")
+except redis.ConnectionError:
+    print("Warning: Redis not available. Deduplication will be disabled.")
+    # Tạo một đối tượng giả lập redis để tránh lỗi
+    class FakeRedis:
+        def exists(self, key): return False
+        def setex(self, key, time, value): pass
+    redis_client = FakeRedis()
+
+CACHE_EXPIRY = 300  # 5 minutes in seconds
+
 @app.route('/')
 def index():
     return "Thuận Pony Travel - Zalo Chatbot is running!"
 
+@app.route('/api_test', methods=['GET'])
+def api_test():
+    """Endpoint test để kiểm tra kết nối với Zalo API"""
+    profile = zalo_api.get_user_profile("3273615087242629962")  # Dùng user_id từ log
+    return jsonify({"api_status": profile})
+
 @app.route('/webhook', methods=['GET', 'POST'])
 async def webhook():
     if request.method == 'GET':
-        # Xử lý yêu cầu xác thực webhook từ Zalo
         return "Webhook is active!"
     
     if request.method == 'POST':
-        # Nhận dữ liệu từ Zalo
         data = request.json
+        print(f"Received webhook: {data}")
         
-        # Xác thực webhook (nếu cần)
+        # Create a unique event ID for deduplication based on event type
+        event_name = data.get('event_name')
+        event_id = None
+        timestamp = int(data.get('timestamp', 0)) / 1000  # Convert to seconds
+        
+        # Generate unique event ID based on event type
+        if event_name == 'user_send_text' and 'message' in data:
+            # For text messages, use the msg_id
+            event_id = f"text:{data['message'].get('msg_id')}"
+        elif event_name == 'follow' and 'follower' in data:
+            # For follow events, use follower ID + timestamp
+            follower_id = data['follower'].get('id')
+            event_id = f"follow:{follower_id}:{data.get('timestamp')}"
+        elif event_name == 'user_click_button' and 'message' in data:
+            # For button clicks, use button_id + timestamp
+            button_id = data['message'].get('button_id', '')
+            event_id = f"button:{button_id}:{data.get('timestamp')}"
+        elif event_name == 'user_send_image' and 'sender' in data:
+            # For images, use sender ID + timestamp
+            sender_id = data['sender'].get('id')
+            event_id = f"image:{sender_id}:{data.get('timestamp')}"
+        else:
+            # For other events, use event name + timestamp
+            event_id = f"event:{event_name}:{data.get('timestamp')}"
+        
+        # Skip processing if we've seen this event before
+        if event_id:
+            # Check if we've seen this event before
+            if redis_client.exists(f"event:{event_id}"):
+                print(f"Skipping duplicate event: {event_id}")
+                return jsonify({"status": "duplicate_skipped"}), 200
+            
+            # Check if the event is too old (more than 5 minutes)
+            current_time = datetime.now().timestamp()
+            if (current_time - timestamp) > 300:  # 300 seconds = 5 minutes
+                print(f"Skipping old event: {event_id}, age: {current_time - timestamp} seconds")
+                return jsonify({"status": "old_event_skipped"}), 200
+            
+            # Add to Redis with expiry
+            redis_client.setex(f"event:{event_id}", CACHE_EXPIRY, str(current_time))
+        
         mac = request.headers.get('X-ZaloOA-Signature')
         if mac and not zalo_api.verify_webhook(data, mac):
             return jsonify({"error": "Invalid signature"}), 401
         
         try:
-            # Xử lý các sự kiện
             event_name = data.get('event_name')
             
             if event_name == 'user_send_text':
-                # Người dùng gửi tin nhắn văn bản
                 user_id = data['sender']['id']
-                message = data['message']['text']
+                print(f"Processing message from user_id: {user_id}")
                 
-                # Xử lý tin nhắn
-                response = await message_handler.process_message(user_id, message)
-                
-                # Gửi phản hồi
-                zalo_api.send_text_message(user_id, response)
-                
-                return jsonify({"status": "success"}), 200
-                
+                if 'text' in data.get('message', {}):
+
+                    # Gửi typing indicator để tạo cảm giác chat thực tế
+                    zalo_api.send_typing_indicator(user_id)
+                    
+                    message = data['message']['text']
+                    response = await message_handler.process_message(user_id, message)
+                    
+                    print(f"Sending response: {response}")
+                    result = zalo_api.send_text_message(user_id, response)
+                    print(f"API response: {result}")
+                    
+                    if "error" in result:
+                        return jsonify({"error": "Failed to send message", "details": result}), 500
+                    return jsonify({"status": "success"}), 200
+                else:
+                    print("No text field in message")
+                    return jsonify({"error": "No text in message"}), 400
+                    
             elif event_name == 'user_click_button':
-                # Người dùng nhấp vào nút
                 user_id = data['sender']['id']
                 button_id = data['message']['button_id']
-                
-                # Xử lý sự kiện click button
-                # TODO: Thêm xử lý các button khác nhau
-                
                 return jsonify({"status": "success"}), 200
                 
-            elif event_name == 'user_follow':
-                # Người dùng follow OA
+            elif event_name == 'follow':
                 user_id = data['follower']['id']
-                
-                # Gửi tin nhắn chào mừng
-                welcome_message = "👋 Xin chào! Cảm ơn bạn đã theo dõi Thuận Pony Travel.\n\n" + \
-                                  "Tôi là trợ lý ảo của Thuận Pony Travel, chuyên cung cấp:\n" + \
-                                  "🌏 Tour du lịch nước ngoài\n" + \
-                                  "🛂 Dịch vụ visa và hộ chiếu\n" + \
-                                  "✈️ Đặt vé máy bay\n\n" + \
-                                  "Tôi có thể giúp gì cho bạn hôm nay?"
-                
-                zalo_api.send_text_message(user_id, welcome_message)
-                
+                welcome_message = (
+                    "👋 Xin chào! Cảm ơn bạn đã theo dõi Passport Lounge.\n\n"
+                    "Tôi là trợ lý ảo của Passport Lounge, chuyên cung cấp:\n"
+                    "🌏 Tour du lịch nước ngoài\n"
+                    "🛂 Dịch vụ visa và hộ chiếu\n"
+                    "✈️ Đặt vé máy bay\n\n"
+                    "Tôi có thể giúp gì cho bạn hôm nay?"
+                )
+                result = zalo_api.send_text_message(user_id, welcome_message)
+                if "error" in result:
+                    return jsonify({"error": "Failed to send welcome message", "details": result}), 500
                 return jsonify({"status": "success"}), 200
                 
             elif event_name == 'user_send_image':
-                # Người dùng gửi hình ảnh
                 user_id = data['sender']['id']
-                
-                # Gửi phản hồi
                 response = "Tôi đã nhận được hình ảnh của bạn. Tuy nhiên, tôi chỉ có thể xử lý tin nhắn văn bản. Vui lòng gửi yêu cầu bằng văn bản."
-                zalo_api.send_text_message(user_id, response)
-                
+                result = zalo_api.send_text_message(user_id, response)
+                if "error" in result:
+                    return jsonify({"error": "Failed to send response", "details": result}), 500
                 return jsonify({"status": "success"}), 200
             
             return jsonify({"status": "unhandled_event"}), 200
             
         except Exception as e:
             print(f"Error processing webhook: {e}")
+            import traceback
+            traceback.print_exc()
             return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
