@@ -33,6 +33,9 @@ except Exception as e:
 
 db = client.travel_chatbot
 
+# Xoá dữ liệu visa cũ
+db.visas.delete_many({})
+
 # Tiếp tục với phần còn lại của code...
 
 # Tiếp tục với phần tạo dữ liệu như trong code của bạn...
@@ -281,66 +284,86 @@ for tour in tours:
     db.tours.insert_one(tour)
 
 # Phần tạo dữ liệu visa với cấu trúc tối ưu
-visas = [
-    # Mẫu cấu trúc visa được cải tiến
-    {
-        "_id": ObjectId(),  # ID duy nhất
-        "country": "Nhật Bản",
-        "country_aliases": ["nhật", "japan", "nhat ban"],  # Các tên gọi thay thế
-        "visa_type": "du lịch",
-        "type_aliases": ["du lich", "tourist", "travel"],  # Các tên gọi thay thế
-        "requirements": {
-            "personal_docs": [  # Tài liệu cá nhân
-                "Hộ chiếu còn hạn ít nhất 6 tháng",
-                "Đơn xin visa (có chữ ký)",
-                "2 ảnh 4.5cm x 4.5cm nền trắng"
-            ],
-            "financial_docs": [  # Tài liệu tài chính
-                "Sao kê tài khoản ngân hàng 3 tháng gần nhất",
-                "Chứng minh tài chính (sổ tiết kiệm hoặc số dư tài khoản)"
-            ],
-            "travel_docs": [  # Tài liệu du lịch
-                "Lịch trình chuyến đi",
-                "Vé máy bay khứ hồi (đặt trước)",
-                "Xác nhận đặt phòng khách sạn",
-                "Bảo hiểm du lịch"
-            ],
-            "employment_docs": [  # Tài liệu việc làm
-                "Giấy xác nhận công việc",
-                "Đơn xin nghỉ phép"
-            ]
-        },
-        "processing_time": "5-7 ngày làm việc",
-        "price": 1500000,  # VNĐ
-        "price_usd": 65,  # USD (để dễ quy đổi)
-        "validity": "3 tháng, một lần nhập cảnh",
-        "notes": "Nộp hồ sơ trực tiếp tại Đại sứ quán hoặc thông qua trung tâm tiếp nhận visa (VFS Global)",
-        "success_rate": "95%",  # Tỷ lệ thành công
-        "faq": [  # Câu hỏi thường gặp
-            {
-                "question": "Có cần phỏng vấn không?",
-                "answer": "Không, visa du lịch Nhật Bản không yêu cầu phỏng vấn trực tiếp."
-            },
-            {
-                "question": "Thời gian lưu trú tối đa là bao lâu?",
-                "answer": "Tối đa 15 ngày đối với visa du lịch một lần nhập cảnh."
-            }
+
+
+# Visa Trung Quốc
+china_visa = {
+    "_id": ObjectId(),
+    "country": "Trung Quốc",
+    "country_aliases": ["trung quoc", "trung quốc", "china", "tq", "trung"],
+    "visa_type": "du lịch",
+    "type_aliases": ["du lich", "du lịch", "tourist", "travel"],
+    "price": 180,
+    "duration": "90 ngày",
+    "processing_time": "10-15 ngày làm việc",
+    "success_rate": 98.6,
+    "requirements": {
+        "travel_docs": [
+            "Hộ chiếu gốc còn hạn ít nhất 6 tháng",
+            "Ảnh thẻ 4x6cm nền trắng chụp trong vòng 3 tháng",
+            "Bản scan CCCD/CMND",
+            "Đơn xin visa điền đầy đủ thông tin",
+            "Giấy xác nhận thông tin cư trú – Mẫu CT07 hoặc Sổ hộ khẩu bản photo"
         ],
-        "created_at": datetime.now(),
-        "updated_at": datetime.now()
+        "financial_docs": [
+            "Sao kê tài khoản ngân hàng 3 tháng gần nhất",
+            "Giấy tờ chứng minh công việc và thu nhập"
+        ],
+        "family_docs": [
+            "Giấy đăng ký kết hôn (nếu đi cùng vợ/chồng)",
+            "Giấy khai sinh (nếu đi cùng con)",
+            "Giấy ủy quyền của cha mẹ (nếu trẻ em đi cùng 1 trong 2 người)"
+        ]
     },
-    # Tương tự cho các loại visa khác...
-]
+    "costs": {
+        "options": [
+            {"type": "Visa nhập cảnh 1 lần", "price": 180, "duration": "90 ngày"},
+            {"type": "Visa nhập cảnh nhiều lần", "price": 300, "duration": "1 năm"}
+        ],
+        "includes": [
+            "Phí lãnh sự quán",
+            "Phí dịch vụ của Passport Lounge"
+        ],
+        "excludes": [
+            "Phí bổ sung hồ sơ tài chính & thu nhập",
+            "Phí xử lý nhanh"
+        ]
+    },
+    "application_centers": [
+        {
+            "city": "Hồ Chí Minh",
+            "address": "Phòng 1607-1609, tầng 16, Saigon Trade Center, 37 Tôn Đức Thắng, phường Bến Nghé, quận 1"
+        },
+        {
+            "city": "Hà Nội",
+            "address": "Tầng 7, tòa nhà Trường Thịnh, Tràng An Complex, số 1 Phùng Chí Kiên, phường Nghĩa Đô, quận Cầu Giấy"
+        },
+        {
+            "city": "Đà Nẵng",
+            "address": "Tầng 8, tòa nhà Indochina Riverside Towers, 74 Bạch Đằng, quận Hải Châu"
+        }
+    ],
+    "benefits": [
+        "Hỗ trợ hoàn thiện hồ sơ",
+        "Không phí phát sinh",
+        "Miễn phí nộp lại khi trượt",
+        "Cam kết trước khi thực hiện"
+    ],
+    "process_steps": [
+        {"name": "Đăng ký tư vấn", "description": "Trao đổi để thẩm định và đề xuất giải pháp tối ưu"},
+        {"name": "Hoàn tất hồ sơ", "description": "1-2 ngày làm việc để hoàn chỉnh hồ sơ"},
+        {"name": "Đặt lịch hẹn", "description": "Đặt lịch nộp hồ sơ tại trung tâm tiếp nhận"},
+        {"name": "Nhận kết quả", "description": "Thông báo và gửi visa đến tận tay khách hàng"}
+    ],
+    "created_at": datetime.now(),
+    "updated_at": datetime.now()
+}
 
-for visa in visas:
-    db.visas.insert_one(visa)
+# Chèn dữ liệu vào database
+# db.visas.insert_one(japan_visa)
+db.visas.insert_one(china_visa)
 
-# Tạo các chỉ mục cho collection visas
-db.visas.create_index([("country", 1)])
-db.visas.create_index([("country_aliases", 1)])
-db.visas.create_index([("visa_type", 1)])
-db.visas.create_index([("type_aliases", 1)])
-db.visas.create_index([("country", 1), ("visa_type", 1)])
+print("Đã tạo dữ liệu visa Nhật Bản và Trung Quốc thành công!")
 
 # Tạo dữ liệu hộ chiếu
 print("Tạo dữ liệu hộ chiếu...")
@@ -394,86 +417,6 @@ passports = [
 
 for passport in passports:
     db.passports.insert_one(passport)
-
-# Tạo dữ liệu vé máy bay
-print("Tạo dữ liệu vé máy bay...")
-flights = [
-    {
-        "airline": "Vietnam Airlines",
-        "flight_number": "VN300",
-        "departure": "Hà Nội",
-        "destination": "Tokyo",
-        "departure_time": datetime.now() + timedelta(days=30, hours=7),
-        "arrival_time": datetime.now() + timedelta(days=30, hours=13),
-        "price": 9500000,  # VNĐ
-        "class_type": "Economy",
-        "baggage_allowance": "23kg",
-        "created_at": datetime.now()
-    },
-    {
-        "airline": "Japan Airlines",
-        "flight_number": "JL751",
-        "departure": "Hồ Chí Minh",
-        "destination": "Tokyo",
-        "departure_time": datetime.now() + timedelta(days=30, hours=10),
-        "arrival_time": datetime.now() + timedelta(days=30, hours=17),
-        "price": 10200000,  # VNĐ
-        "class_type": "Economy",
-        "baggage_allowance": "23kg",
-        "created_at": datetime.now()
-    },
-    {
-        "airline": "Korean Air",
-        "flight_number": "KE684",
-        "departure": "Hà Nội",
-        "destination": "Seoul",
-        "departure_time": datetime.now() + timedelta(days=15, hours=0),
-        "arrival_time": datetime.now() + timedelta(days=15, hours=6),
-        "price": 7800000,  # VNĐ
-        "class_type": "Economy",
-        "baggage_allowance": "23kg",
-        "created_at": datetime.now()
-    },
-    {
-        "airline": "Singapore Airlines",
-        "flight_number": "SQ185",
-        "departure": "Hồ Chí Minh",
-        "destination": "Singapore",
-        "departure_time": datetime.now() + timedelta(days=7, hours=14),
-        "arrival_time": datetime.now() + timedelta(days=7, hours=17),
-        "price": 4500000,  # VNĐ
-        "class_type": "Economy",
-        "baggage_allowance": "30kg",
-        "created_at": datetime.now()
-    },
-    {
-        "airline": "Emirates",
-        "flight_number": "EK393",
-        "departure": "Hà Nội",
-        "destination": "Paris",
-        "departure_time": datetime.now() + timedelta(days=45, hours=23, minutes=55),
-        "arrival_time": datetime.now() + timedelta(days=46, hours=14, minutes=25),
-        "price": 25000000,  # VNĐ
-        "class_type": "Economy",
-        "baggage_allowance": "30kg",
-        "created_at": datetime.now()
-    },
-    {
-        "airline": "Qatar Airways",
-        "flight_number": "QR977",
-        "departure": "Hồ Chí Minh",
-        "destination": "New York",
-        "departure_time": datetime.now() + timedelta(days=60, hours=7, minutes=35),
-        "arrival_time": datetime.now() + timedelta(days=61, hours=5, minutes=15),
-        "price": 32000000,  # VNĐ
-        "class_type": "Economy",
-        "baggage_allowance": "32kg",
-        "created_at": datetime.now()
-    }
-]
-
-for flight in flights:
-    db.flights.insert_one(flight)
 
 # Tạo dữ liệu FAQ
 print("Tạo dữ liệu FAQ...")

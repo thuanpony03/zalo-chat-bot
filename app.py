@@ -12,6 +12,7 @@ from services.zalo_api import ZaloAPI
 from services.message_handler import message_handler
 from datetime import datetime, timedelta
 import redis
+from services.database import db
 
 load_dotenv()
 
@@ -159,6 +160,76 @@ async def webhook():
             import traceback
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
+
+@app.route('/api/visa-products', methods=['GET'])
+def get_visa_products():
+    """API để lấy danh sách sản phẩm visa"""
+    try:
+        country = request.args.get('country', '')
+        
+        query = {}
+        if country:
+            query["country"] = {"$regex": country, "$options": "i"}
+        
+        products = list(db.get_collection("visas").find(
+            query, 
+            {
+                "country": 1, 
+                "visa_type": 1, 
+                "price": 1, 
+                "duration": 1, 
+                "visa_method": 1,
+                "product_id": 1,
+                "product_url": 1
+            }
+        ))
+        
+        # Convert ObjectId to string
+        for product in products:
+            product["_id"] = str(product["_id"])
+        
+        return jsonify({"products": products}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Thêm route API để xử lý form đăng ký tư vấn
+@app.route('/api/consultation-request', methods=['POST'])
+def submit_consultation_request():
+    """API nhận thông tin khách hàng đăng ký tư vấn"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "Missing request data"}), 400
+            
+        required_fields = ['name', 'phone', 'destination']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"error": f"Missing required field: {field}"}), 400
+        
+        # Tạo dữ liệu yêu cầu tư vấn
+        consultation_data = {
+            "name": data['name'],
+            "phone": data['phone'],
+            "destination": data['destination'],
+            "visa_type": data.get('visa_type', 'Du lịch'),
+            "planned_date": data.get('planned_date', ''),
+            "message": data.get('message', ''),
+            "special_case": data.get('special_case', False),
+            "source": "Zalo Bot",
+            "status": "new",
+            "created_at": datetime.now()
+        }
+        
+        # Lưu vào DB
+        db.consultation_requests.insert_one(consultation_data)
+        
+        # Thông báo cho admin qua email hoặc SMS (implement later)
+        
+        return jsonify({"success": True, "message": "Yêu cầu tư vấn đã được gửi thành công!"}), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

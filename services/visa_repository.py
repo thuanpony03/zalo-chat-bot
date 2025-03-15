@@ -4,7 +4,7 @@ import re
 
 class VisaRepository:
     def __init__(self):
-        self.collection = db.visas
+        self.collection = db.get_collection("visas")  # Fixed: use get_collection instead of direct attribute access
         self.cache = {}  # Simple in-memory cache
     
     def find_by_country_and_type(self, country, visa_type=None):

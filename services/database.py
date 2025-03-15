@@ -1,33 +1,28 @@
 from pymongo import MongoClient
-import os
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
+from config import Config
 
 class Database:
     def __init__(self):
-        # Connect to local MongoDB
-        self.client = MongoClient('mongodb://localhost:27017/')
-        self.db = self.client.travel_chatbot
-        
-        # Collections
-        self.locations = self.db.locations
-        self.tours = self.db.tours
-        self.hotels = self.db.hotels
-        self.visas = self.db.visas
-        self.flights = self.db.flights
-        self.passports = self.db.passports
-        self.bookings = self.db.bookings
-        self.conversations = self.db.conversations
-        self.faqs = self.db.faqs
-        self.users = self.db.users
-        
+        try:
+            # Sửa MONGO_URI thành MONGODB_URI để khớp với config.py
+            self.client = MongoClient(Config.MONGODB_URI)
+            self.db = self.client[Config.MONGODB_DB]
+            print("MongoDB connected successfully")
+        except Exception as e:
+            print(f"MongoDB connection error: {e}")
+            raise
+
     def get_collection(self, collection_name):
         return self.db[collection_name]
-        
-    def close(self):
-        self.client.close()
 
-# Create instance
+    def insert_one(self, collection_name, document):
+        return self.db[collection_name].insert_one(document)
+
+    def find(self, collection_name, query=None, projection=None):
+        return self.db[collection_name].find(query or {}, projection or {})
+
+    def close(self):
+        if self.client:
+            self.client.close()
+
 db = Database()
