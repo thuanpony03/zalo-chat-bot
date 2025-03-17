@@ -113,6 +113,13 @@ class LeadService:
         }).sort("follow_up_date", 1)
         
         return [Lead.from_dict(item) for item in data]
+    
+    def create_lead_with_description(self, lead_data, description):
+        """Create a new lead with detailed description"""
+        if "description" not in lead_data:
+            lead_data["description"] = description
+            
+        return self.create_lead(lead_data)
 
 # Initialize service
 lead_service = LeadService()
