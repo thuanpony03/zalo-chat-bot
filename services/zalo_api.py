@@ -16,7 +16,7 @@ class ZaloAPI:
         self.app_id = os.environ.get('ZALO_APP_ID')
         self.secret_key = os.environ.get('ZALO_APP_SECRET')
         # self.access_token = os.environ.get('ZALO_ACCESS_TOKEN')
-        self.access_token = "p8aM0YNBmopDZX4C8Cx0BS-84GWgrO5IeC8nCKxbdn3Oz2zIDS691vlOBbP-xxGnzVGERKZTkZ7awMr9KAtCBBwi7LusiSiYavrbQW2QvJJeWrbvPvQND9RKCHK3uUfOXkTF2WhZb76HvZ0EVTsBKzV07GCoovOcdTeZ1XlCWMMDp5GW0ipnPxZoL28hpDn4cVLQCJparXQjf70r88VQGQF7S3e5wznYjy9o7Hw0-asQgNWxDAp_TDgkB5DJvVWAlCPJNmRUv229cLDUDexO0jwdS4nudF8iozzK2r_ay57Ao6G8R_UgA8lg0mmqtOnueCCYFJ_Veb2LcGOV3Pg6N-Up4ZXtXgDE_RuG66EbeZxxlWrwKQM9ECQu86XE_Q4toFaq5LVjdpgyt2XtCiZ_9qFSS-CN9DJ7B0"
+        self.access_token = "6QuAGGQI4d8OgGrF0vSHSngl3Ki9Z7aKJFS5MJwJR6PPy6y41RK6Ea7A6M4vyLyYGxOa7LtoU4GYkcK2CCGFUosHTXjnz0aW29fsQtFbDZiZe2bUFVbW1dEd35KIdsGkSlupN0-VK68KsKOyHfmFMGNuSICMeIf3JE1H9m2EHcP9on0v2UjoN6IrR08VoYvGOfTFQnZE2rb1adOy6VLXSMBD93G4eZmEJEL4RmAh1mjanNbR5fazDblJ8bC3ZpzhGi1X6ms876KNttG3MP4YJZN9Jmbba21G2T1OB6kM9aSPzcm9ISqeMp2iJMP3mWiZ3fWM7Md2Q64kjIidG-bpQm6CELPok49lB84L86dUV6WvfXO8VE9YP1wLBIPLxLby7BzQ0WNVJKzrY00S3-03OrUzPp4KYGfiAWqk2WUD5d8"
         # Change API version from v3.0 to v3
         self.base_url = "https://openapi.zalo.me/v3.0"
         

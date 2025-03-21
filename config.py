@@ -8,7 +8,7 @@ class Config:
     
     # Cập nhật địa chỉ MongoDB nếu bạn đang sử dụng container
     MONGODB_URI = "mongodb://admin:password@localhost:27017"
-    MONGODB_DB = "zalo_chatbot"
+    MONGODB_DB = "zalo-chat-bot"
     
     # Các cấu hình khác giữ nguyên
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")

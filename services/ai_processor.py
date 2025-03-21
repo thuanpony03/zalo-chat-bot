@@ -21,34 +21,24 @@ class AIProcessor:
         self.model = genai.GenerativeModel('gemini-2.0-flash')
         self.visa_data = {}  # Cache dữ liệu visa
         self.last_refresh = None  # Thời gian làm mới cache cuối cùng
+        self.conversation_context = {}  # Theo dõi ngữ cảnh hội thoại
 
     async def load_visa_data(self, country=None):
         """Load visa data from database, optionally for a specific country."""
-        from services.database import db
         try:
-            if (
-                self.last_refresh
-                and (datetime.now() - self.last_refresh) < timedelta(hours=24)
-                and not country
-            ):
+            from services.database import db
+            if (self.last_refresh and (datetime.now() - self.last_refresh) < timedelta(hours=24) and not country):
                 logger.info("Sử dụng dữ liệu visa từ cache")
                 return True
-
-            query = (
-                {}
-                if not country
-                else {"country": {"$regex": f"^{country}$", "$options": "i"}}
-            )
+            query = {} if not country else {"country": {"$regex": f"^{country}$", "$options": "i"}}
             visas = list(db.get_collection("visas").find(query))
             logger.info(f"Tìm thấy {len(visas)} bản ghi visa trong database")
-
             for visa in visas:
                 visa['_id'] = str(visa['_id'])
                 country_key = visa.get('country', '').lower()
                 if country_key not in self.visa_data:
                     self.visa_data[country_key] = []
                 self.visa_data[country_key].append(visa)
-
             if not country:
                 self.last_refresh = datetime.now()
             logger.info(f"Đã tải visa cho các quốc gia: {list(self.visa_data.keys())}")
@@ -58,20 +48,19 @@ class AIProcessor:
             return False
 
     async def process_visa_query(self, user_query, user_context=None):
+        """Process visa query and return response with context."""
         try:
             if not self.visa_data:
                 await self.load_visa_data()
-
             context_to_return = user_context or {}
+            self.conversation_context = context_to_return.copy()
 
-            # Save original query if this is a new conversation
-            if (
-                not user_context
-                or 'previous_messages' not in user_context
-                or len(user_context.get('previous_messages', [])) <= 1
-            ):
+            # Lưu câu hỏi gốc nếu là hội thoại mới
+            if (not user_context or 'previous_messages' not in user_context or 
+                len(user_context.get('previous_messages', [])) <= 1):
                 context_to_return['original_query'] = user_query
 
+            # Reset hội thoại
             if user_query.lower() in ["reset", "restart", "bắt đầu lại", "khởi động lại"]:
                 if user_context and 'user_id' in user_context:
                     from services.database import db
@@ -90,11 +79,8 @@ class AIProcessor:
                 customer_name = context_to_return.get('customer_name', '') or self._extract_customer_name(user_query)
                 user_id = user_context.get('user_id') if user_context else None
                 await self._save_customer_contact(
-                    customer_name,
-                    phone_number,
-                    context_to_return.get('country', ''),
-                    user_id,
-                    context_to_return  # Truyền context_to_return đầy đủ
+                    customer_name, phone_number, context_to_return.get('country', ''),
+                    user_id, context_to_return
                 )
                 if user_id:
                     from services.database import db
@@ -142,11 +128,16 @@ class AIProcessor:
                 context_to_return['family_travel'] = True
             if stay_duration:
                 context_to_return['stay_duration'] = stay_duration
-            if current_country:
-                context_to_return['country'] = current_country
-                if current_country.lower() not in self.visa_data:
-                    await self.load_visa_data(current_country)
-                logger.info(f"Quốc gia mới từ câu hỏi: {current_country}")
+
+            # Cập nhật phát hiện quốc gia với xử lý ngữ cảnh tốt hơn
+            potential_country = self._extract_country_from_query(user_query)
+            if potential_country and self._is_valid_country_detection(potential_country, user_query):
+                context_to_return['country'] = potential_country
+                logger.info(f"Quốc gia mới từ câu hỏi: {potential_country}")
+                if potential_country.lower() not in self.visa_data:
+                    await self.load_visa_data(potential_country)
+            elif user_context and 'country' in user_context:
+                context_to_return['country'] = user_context['country']
 
             if user_context and 'user_id' in user_context:
                 from services.database import db
@@ -187,44 +178,34 @@ class AIProcessor:
         from services.database import db
         from services.lead_service import lead_service
         try:
-            # Check if lead already exists - NEVER UPDATE EXISTING LEADS
             leads_collection = db.get_collection("leads")
             existing_lead = leads_collection.find_one({"phone": phone})
             if existing_lead:
                 logger.info(f"Lead với SĐT {phone} đã tồn tại, không cập nhật")
                 return True
 
-            # If name not provided through function parameter, try to extract it
             if not name and context:
                 name = self._extract_customer_name_from_context(context, phone)
 
-            # Extract previous messages from context
             previous_messages = context.get('previous_messages', []) if context else []
             user_queries = [msg['message'] for msg in previous_messages if msg.get('sender') == 'user']
 
-            # Look for the original query (typically the first substantive question)
             original_query = None
             for msg in user_queries:
                 if len(msg) > 15 and not msg.startswith(('hi', 'hello', 'chào', 'xin chào')):
                     original_query = msg
                     break
 
-            # Generate description based on conversation context
             default_desc = f"Khách hàng để lại số {phone} để tư vấn visa"
             if country:
                 default_desc += f" - Quan tâm visa {country}"
 
-            # Combine all user queries for analysis
             combined_text = " ".join(user_queries).lower()
-
-            # Process special cases - track all special cases, not just the first one
             special_concerns = False
             special_case_types = []
-            
-            # Dictionary to store all detected special cases
             case_details = {}
-            
-            # Check for visa rejections with count
+
+            # Kiểm tra visa bị từ chối
             rejection_match = None
             for pattern in [
                 r"(?:đã|từng|bị)\s+(?:rớt|trượt|từ chối)\s+visa\s+(\d+)\s+(?:lần|lan)",
@@ -236,55 +217,48 @@ class AIProcessor:
                     rejection_match = matches[0]
                     special_concerns = True
                     special_case_types.append("previous_rejection")
-                    case_details["previous_rejection"] = f"⚠️ Từng bị từ chối visa {country if country else ''} {rejection_match} lần"
+                    case_details["previous_rejection"] = (
+                        f"⚠️ Từng bị từ chối visa {country if country else ''} {rejection_match} lần"
+                    )
                     break
-                    
-            # Check for illegal stay relatives
-            if any(term in combined_text for term in 
-                  ['bất hợp pháp', 'người thân ở', 'người thân bên đó', 'ở lại']):
+
+            # Kiểm tra người thân ở lại bất hợp pháp
+            if any(term in combined_text for term in ['bất hợp pháp', 'người thân ở', 'người thân bên đó', 'ở lại']):
                 special_concerns = True
                 special_case_types.append("illegal_stay")
-                case_details["illegal_stay"] = f"⚠️ Có người thân ở {country if country else 'nước ngoài'} bất hợp pháp"
-                
-            # Check for no savings
-            if any(term in combined_text for term in 
-                  ['không có sổ', 'không stk', 'ko stk', 'không tài khoản']):
+                case_details["illegal_stay"] = (
+                    f"⚠️ Có người thân ở {country if country else 'nước ngoài'} bất hợp pháp"
+                )
+
+            # Kiểm tra không có sổ tiết kiệm
+            if any(term in combined_text for term in ['không có sổ', 'không stk', 'ko stk', 'không tài khoản']):
                 special_concerns = True
-                special_case_types.append("no_savings") 
+                special_case_types.append("no_savings")
                 case_details["no_savings"] = "⚠️ Không có sổ tiết kiệm"
-                
-            # Check for freelance work
-            if any(term in combined_text for term in 
-                  ['tự do', 'freelance', 'không công ty', 'làm tự do']):
+
+            # Kiểm tra công việc tự do
+            if any(term in combined_text for term in ['tự do', 'freelance', 'không công ty', 'làm tự do']):
                 special_concerns = True
                 special_case_types.append("freelance_job")
                 case_details["freelance_job"] = "⚠️ Làm việc tự do/freelance"
 
-            # Build final description focusing on most important details first
+            # Xây dựng mô tả cuối cùng
             description_parts = []
-
-            # 1. Add all special case warnings at the beginning
             for case_type in special_case_types:
                 description_parts.append(case_details[case_type])
 
-            # 2. Add country information if available and not already included
             if country and not any("visa" in part.lower() and country.lower() in part.lower() for part in description_parts):
                 description_parts.append(f"Quan tâm visa {country}")
 
-            # 3. Add name and phone information
             if name:
                 description_parts.append(f"{name}: {phone}")
             else:
                 description_parts.append(f"SĐT: {phone}")
 
-            # Combine all parts into final description
             final_description = " - ".join(description_parts)
-
-            # If no special description was generated, use default
             if not description_parts:
                 final_description = default_desc
 
-            # Lead data
             customer_data = {
                 "name": name or "",
                 "phone": phone,
@@ -296,11 +270,10 @@ class AIProcessor:
                 "updated_at": datetime.now(),
                 "original_query": original_query,
                 "special_concerns": special_concerns,
-                "special_case_types": special_case_types,  # Store all special case types
+                "special_case_types": special_case_types,
                 "description": final_description
             }
 
-            # Insert lead with optimized description
             lead_id = lead_service.create_lead_with_description(customer_data, final_description)
             logger.info(f"Đã lưu thông tin khách hàng: {phone} với mô tả: {final_description}")
             return True
@@ -308,57 +281,47 @@ class AIProcessor:
         except Exception as e:
             logger.error(f"Lỗi khi lưu thông tin khách hàng: {e}", exc_info=True)
             return False
-            
+
     def _extract_customer_name_from_context(self, context, phone=None):
         """Extract customer name from context more thoroughly."""
         try:
-            # Get all user messages
             previous_messages = context.get('previous_messages', [])
             user_messages = [msg['message'] for msg in previous_messages if msg.get('sender') == 'user']
-            
+
             if not user_messages:
                 return None
-                
-            # First try standard name patterns in each message
+
             for message in user_messages:
                 name = self._extract_customer_name(message)
                 if name:
                     return name
-            
-            # If phone is provided, try to find name right before the phone number
+
             if phone:
                 for message in user_messages:
                     if phone in message:
-                        # Check if there's text before the phone number that could be a name
                         parts = message.split(phone)
                         if parts and parts[0].strip():
-                            # Extract potential name before phone number
                             potential_name = parts[0].strip()
-                            # Remove common prefixes
-                            potential_name = re.sub(r'^(sđt|số|tôi là|tên|là|gọi|chào|a|anh|chị|em|c|e|hello|hi|xin chào|xin)\s+', '', potential_name, flags=re.IGNORECASE)
-                            # Remove punctuation at the end
+                            potential_name = re.sub(
+                                r'^(sđt|số|tôi là|tên|là|gọi|chào|a|anh|chị|em|c|e|hello|hi|xin chào|xin)\s+',
+                                '', potential_name, flags=re.IGNORECASE
+                            )
                             potential_name = re.sub(r'[:,.;]+$', '', potential_name)
-                            
                             if potential_name and 2 <= len(potential_name) <= 30:
                                 return potential_name
-            
-            # Try for "name - phone" pattern by looking at the last message
+
             if user_messages:
                 last_message = user_messages[-1]
-                
-                # Look for a pattern where name might be before or after phone number
                 if phone and phone in last_message:
-                    # Split by common separators
                     for separator in ['-', ':', ' ', ',']:
                         parts = last_message.split(separator)
                         for i, part in enumerate(parts):
                             if phone in part:
-                                # Check if there's a part before or after that could be a name
                                 if i > 0 and len(parts[i-1].strip()) > 1:
                                     return parts[i-1].strip()
                                 elif i < len(parts)-1 and len(parts[i+1].strip()) > 1:
                                     return parts[i+1].strip()
-            
+
             return None
         except Exception:
             return None
@@ -367,19 +330,16 @@ class AIProcessor:
         """Extract customer name from text."""
         if not text:
             return None
-            
         name_patterns = [
             r'(?:tên|tôi|mình|tui|em|anh|chị) (?:là|tên là|tên|gọi là) ([A-Za-zÀ-ỹ\s]{2,30})',
             r'(?:tên|họ tên|họ và tên)[:\s]+([A-Za-zÀ-ỹ\s]{2,30})',
-            r'(\b[A-Za-zÀ-ỹ\s]{2,30}\b)(?=\s*(?:\d{9,11}|\+84\d{9,10}))'  # Tên trước số điện thoại
+            r'(\b[A-Za-zÀ-ỹ\s]{2,30}\b)(?=\s*(?:\d{9,11}|\+84\d{9,10}))'
         ]
-
         for pattern in name_patterns:
             matches = re.search(pattern, text, re.IGNORECASE)
             if matches:
                 return matches.group(1).strip()
-                
-        # Look for simple "Name SDT" pattern where SDT is already identified
+
         phone_pattern = r'(0[0-9]{9,10})|(\+84[0-9]{9,10})'
         phone_matches = re.findall(phone_pattern, text)
         if phone_matches:
@@ -391,59 +351,147 @@ class AIProcessor:
                         break
                 if phone:
                     break
-                        
             if phone:
-                # Try to find name near the phone number
                 parts = text.split(phone)
-                # Check text before phone
                 if parts[0].strip():
                     potential_name = parts[0].strip()
-                    # Remove common prefixes and punctuation
-                    potential_name = re.sub(r'^(sđt|số|tôi là|tên|là|gọi|chào|a|anh|chị|em|c|e|hello|hi|xin chào|xin)\s+', '', potential_name, flags=re.IGNORECASE)
+                    potential_name = re.sub(
+                        r'^(sđt|số|tôi là|tên|là|gọi|chào|a|anh|chị|em|c|e|hello|hi|xin chào|xin)\s+',
+                        '', potential_name, flags=re.IGNORECASE
+                    )
                     potential_name = re.sub(r'[:,.;]+$', '', potential_name)
                     if potential_name and 2 <= len(potential_name) <= 30:
                         return potential_name
-                # Check text after phone
                 if len(parts) > 1 and parts[1].strip():
                     potential_name = parts[1].strip()
                     if potential_name and 2 <= len(potential_name) <= 30:
                         return potential_name
-
         return None
 
     def _extract_country_from_query(self, query):
-        """Extract country from the user's query."""
+        """Extract country from the user's query with more strict validation."""
         if not query:
             return None
-
+            
         query_lower = query.lower()
+        
+        # Kiểm tra một cách nghiêm ngặt hơn với các từ khóa rõ ràng
         country_keywords = {
-            "trung quốc": ["trung quốc", "trung quoc", "china", "tq", "trung"],
-            "ấn độ": ["ấn độ", "an do", "india", "ấn", "in độ", "in do"],
-            "hàn quốc": ["hàn quốc", "han quoc", "korea", "hàn", "han"],
-            "nhật bản": ["nhật bản", "nhat ban", "japan", "nhật", "nhat"],
-            "hongkong": ["hongkong", "hong kong", "hồng kông", "hk", "hong", "hồng"],
-            "đài loan": ["đài loan", "dai loan", "taiwan", "đài", "dai"],
-            "nga": ["nga", "russia", "liên bang nga", "lien bang nga", "russian"],
-            "úc": ["úc", "australia", "uc", "au", "nước úc"],
-            "mỹ": ["mỹ", "usa", "america", "united states", "my", "hoa kỳ"],
-            "anh": ["anh", "uk", "england", "anh quốc", "british"],
-            "canada": ["canada"]
+            "trung quốc": ["trung quoc", "china", "tq ", "trung hoa", "china"],
+            "nhật bản": ["nhật", "japan", "nhat ban", "jp"],
+            "hàn quốc": ["hàn", "korea", "han quoc", "south korea", "hq"],
+            "đài loan": ["đài loan", "dai loan", "taiwan"],
+            "hongkong": ["hong kong", "hồng kông", "hk"],
+            "macau": ["ma cao", "macao"],
+            "singapore": ["sing", "singapore"],
+            "ấn độ": ["ấn độ", "an do", "india", "ấn độ"],
+            "thái lan": ["thái", "thai lan", "thailand"],
+            "malaysia": ["malay", "malaysia"],
+            "indonesia": ["indo", "indon"],
+            "philippines": ["philipin", "phi"],
+            "việt nam": ["việt nam", "viet nam", "vn"],
+            "pakistan": ["pak", "pakistan"],
+            "myanmar": ["myan", "miến điện", "mien dien", "burma"],
+            "triều tiên": ["trieu tien", "north korea"],
+            "nga": ["nga ", "russia", "liên bang nga", "lien bang nga", "russian"],
+            "đức": ["đức ", "duc ", "germany", "german", "đức quốc"],
+            "pháp": ["pháp ", "phap ", "france", "french"],
+            "ý": ["ý ", "y ", "italy", "italia", "italian"],
+            "anh": ["anh quốc", "uk", "england", "british"],
+            "tây ban nha": ["tbn", "tay ban nha", "spain", "spanish"],
+            "bồ đào nha": ["bo dao nha", "portugal"],
+            "hà lan": ["ha lan", "netherlands", "dutch"],
+            "bỉ": ["bỉ ", "bi ", "belgium", "belgian"],
+            "đan mạch": ["dan mach", "denmark", "danish"],
+            "thụy điển": ["thuy dien", "sweden", "swedish"],
+            "thụy sĩ": ["thuy si", "switzerland", "swiss"],
+            "áo": ["áo ", "ao ", "austria", "austrian"],
+            "hy lạp": ["hy lap", "greece", "greek"],
+            "phần lan": ["phan lan", "finland", "finnish"],
+            "na uy": ["na uy", "norway", "norwegian"],
+            "ireland": ["ai len", "ái len", "ireland"],
+            "ba lan": ["ba lan", "poland", "polish"],
+            "cộng hòa séc": ["ch séc", "séc", "czech", "czechia"],
+            "mỹ": ["mỹ ", "usa", "america", "united states", "my ", "hoa kỳ"],
+            "canada": ["canada"],
+            "mexico": ["mê hi cô", "me hi co", "mexico"],
+            "brazil": ["bra-xin", "bra zin", "brazil"],
+            "argentina": ["ác hen ti na", "ac hen ti na", "argentina"],
+            "peru": ["pê ru", "pe ru", "peru"],
+            "chile": ["chi lê", "chi le", "chile"],
+            "colombia": ["cô lôm bi a", "co lom bia", "colombia"],
+            "cuba": ["cu ba", "cuba"],
+            "úc": ["úc ", "australia", "uc ", "au ", "nước úc"],
+            "new zealand": ["nz", "niu di lân", "new zealand"],
+            "nam phi": ["south africa", "nam phi"],
+            "ai cập": ["ai cap", "egypt"],
+            "maroc": ["ma rốc", "morocco", "maroc"],
+            "kenya": ["kê ni a", "ke ni a", "kenya"],
+            "namibia": ["na-mi-bi-a", "namibia"],
+            "ả rập xê út": ["saudi arabia", "a rap xe ut", "saudi"],
+            "qatar": ["catar", "ca ta", "qatar"],
+            "thổ nhĩ kỳ": ["thổ", "tho nhi ky", "turkey", "turkish"],
+            "dubai": ["du bai", "uae", "emirates"],
+            "schengen": ["sen-gen", "khối schengen", "châu âu", "eu"],
+            "trung đông": ["middle east", "trung đông"],
+            "châu phi": ["africa", "châu phi"],
+            "đông nam á": ["southeast asia", "asean", "đông nam á"]
         }
-
+        
+        # Xác minh chặt chẽ hơn cho từng quốc gia
         for country, keywords in country_keywords.items():
             for keyword in keywords:
-                if keyword in query_lower.split():
-                    return country
-
-        try:
-            for country in self.visa_data.keys():
-                if country in query_lower:
-                    return country
-        except Exception:
-            pass
-
+                # Tìm kiếm chính xác từ khóa trong câu
+                # Thêm dấu cách hoặc ranh giới từ để tránh kết quả sai
+                if (f" {keyword} " in f" {query_lower} " or 
+                    query_lower.startswith(f"{keyword} ") or 
+                    query_lower.endswith(f" {keyword}") or
+                    query_lower == keyword):
+                    
+                    # Xác thực thêm để loại trừ các từ đa nghĩa
+                    if self._is_valid_country_detection(country, query):
+                        return country
+        
+        # Nếu không tìm thấy quốc gia rõ ràng, trả về None
         return None
+
+    def _is_valid_country_detection(self, detected_country, query):
+        """Validate if a country detection is likely correct and not a false positive."""
+        query_lower = query.lower()
+        
+        # Các từ có thể gây hiểu nhầm
+        ambiguous_words = {
+            "ý định", "ý nghĩa", "ý là", "ý ạ", "ý nhé", 
+            "anh nhé", "anh ạ", "anh/chị", "anh chị", 
+            "vì", "ý kiến", "tôi", "công ty", "cty", "mình"
+        }
+        
+        # Kiểm tra các trường hợp dễ nhầm lẫn
+        for phrase in ambiguous_words:
+            if phrase in query_lower:
+                # Nếu "ý" là quốc gia đang kiểm tra và từ "ý" trong từ đa nghĩa
+                if detected_country == "ý" and "ý" in phrase:
+                    return False
+                # Nếu "anh" là quốc gia đang kiểm tra và từ "anh" trong từ đa nghĩa
+                if detected_country == "anh" and "anh" in phrase:
+                    return False
+        
+        # Kiểm tra thêm độ chắc chắn
+        detection_patterns = {
+            "ý": [r'\bý\b', r'\by\b', r'\bitaly\b', r'\bitalia\b'],
+            "anh": [r'\banh quốc\b', r'\bengland\b', r'\buk\b', r'\bbritish\b'],
+            "nga": [r'\bnga\b', r'\brussia\b', r'\bliên bang nga\b'],
+            "đức": [r'\bđức\b', r'\bduc\b', r'\bgermany\b', r'\bgerman\b'],
+            "mỹ": [r'\bmỹ\b', r'\bmy\b', r'\busa\b', r'\bamerica\b']
+        }
+        
+        # Nếu quốc gia cần xác minh nghiêm ngặt hơn
+        if detected_country in detection_patterns:
+            patterns = detection_patterns[detected_country]
+            return any(re.search(pattern, query_lower) for pattern in patterns)
+        
+        # Cho các quốc gia khác, chấp nhận phát hiện ban đầu
+        return True
 
     def _extract_family_travel(self, query):
         """Detect if the user intends to travel with family."""
@@ -458,7 +506,6 @@ class AIProcessor:
         """Extract intended stay duration from query."""
         query_lower = query.lower()
         duration_matches = re.findall(r'(\d+)\s*(ngày|tuần|tháng|năm|thang|nam|tuan)', query_lower)
-
         if duration_matches:
             number, unit = duration_matches[0]
             number = int(number)
@@ -504,7 +551,6 @@ class AIProcessor:
         """Convert visa duration string to days."""
         if not duration_str:
             return 0
-
         duration_str = duration_str.lower()
         if "ngày" in duration_str:
             try:
@@ -531,7 +577,6 @@ class AIProcessor:
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(None, lambda: self.model.generate_content(prompt))
             result = response.text.strip()
-
             if len(result) < 100 and "số điện thoại" not in result.lower():
                 result += " Anh/chị vui lòng để lại số điện thoại để tư vấn viên liên hệ hỗ trợ chi tiết nhé!"
             return result
@@ -542,13 +587,12 @@ class AIProcessor:
     def _build_visa_prompt(self, query, visa_info, context_str="", user_context=None):
         """Build an effective prompt for visa queries."""
         prompt = (
-            "Bạn là tư vấn viên visa chuyên nghiệp tại Passport Lounge với giọng điệu tự nhiên giống người.\n"
+            "Bạn là tư vấn viên visa chuyên nghiệp tại Passport Lounge với giọng điệu tự nhiên giống người, lịch sự và thân thiện.\n"
             "CẢNH BÁO QUAN TRỌNG: Phản hồi của bạn PHẢI NGẮN GỌN (tối đa 4-5 câu, khoảng 300-400 ký tự).\n"
             "KHÔNG liệt kê chi tiết giấy tờ hay quy trình cụ thể.\n"
             "Giọng điệu thân thiện, đồng cảm và tự nhiên.\n"
             "Khi nói về giá, LUÔN sử dụng khoảng giá (ví dụ: 'khoảng 3-4 triệu') thay vì số chính xác.\n"
         )
-
         if context_str:
             prompt += f"\nNgữ cảnh cuộc hội thoại:\n{context_str}\n"
 
@@ -562,7 +606,6 @@ class AIProcessor:
             discounted_price_vnd = int(discounted_price * 25000) if discounted_price else 0
             price_range_low = int(discounted_price_vnd * 0.9 / 1000000)
             price_range_high = int(discounted_price_vnd * 1.1 / 1000000)
-
             prompt += f"- Giá thật: ${price} USD (khoảng {price_vnd:,} VND)\n"
             prompt += f"- Giá báo khách: khoảng {price_range_low}-{price_range_high} triệu VND\n"
             prompt += f"- Thời gian xử lý: {visa_info.get('processing_time', '')}\n"
@@ -581,6 +624,7 @@ class AIProcessor:
                 "3. Nói đã giúp nhiều khách hàng tương tự thành công.\n"
                 "4. ĐỀ CẬP RẰNG: Để tư vấn chi tiết cho trường hợp này, cần liên hệ hotline 1900 636563 hoặc để lại SĐT.\n"
             )
+
         prompt += f"\nCâu hỏi hiện tại: {query}\n"
         prompt += (
             "\nHƯỚNG DẪN PHẢN HỒI:\n"
@@ -599,7 +643,6 @@ class AIProcessor:
             "- Đề xuất liên hệ một cách tự nhiên, không gây áp lực, chẳng hạn "
             "'Để tư vấn chi tiết hơn, anh/chị có thể để lại SĐT hoặc gọi hotline 1900 636563 ạ'.\n"
         )
-
         return prompt
 
     def _extract_phone_number(self, text):
@@ -641,7 +684,6 @@ class AIProcessor:
             "cần gấp", "khẩn", "nhanh", "sớm", "tuần sau", "vài ngày tới",
             "cuối tháng", "gấp rút", "express", "cấp tốc"
         ]
-
         return any(pattern in query for pattern in special_concern_patterns)
 
 ai_processor = AIProcessor()

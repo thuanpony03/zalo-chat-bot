@@ -1,197 +1,272 @@
-# Service for tour_service
-# Created: 2025-03-04 23:44:55
-# Author: thuanpony03
-
-from services.database import db
-from bson import ObjectId
-import re
+#!/usr/bin/env python3
+"""
+AI Processor for private tour pricing and consultation with optimized logic and persistent context.
+"""
+import asyncio
+import json
+import logging
 from datetime import datetime
 
-class TourService:
+import google.generativeai as genai
+import redis
+from config import Config  # Assumes Config contains API key
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Initialize Redis for persistent storage
+redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+
+# Giới hạn ký tự tối đa cho một tin nhắn Zalo (160 ký tự)
+ZALO_MESSAGE_LIMIT = 160
+
+
+class TourPriceProcessor:
     def __init__(self):
-        pass
-        
-    def search_tours(self, **kwargs):
-        """Tìm kiếm tour dựa trên các tiêu chí"""
-        query = {}
-        
-        # Tìm theo điểm đến
-        if "destination" in kwargs:
-            destination = kwargs["destination"]
-            # Tìm ID của điểm đến từ tên
-            location = db.locations.find_one(
-                {"$or": [
-                    {"name": {"$regex": f".*{destination}.*", "$options": "i"}},
-                    {"popular_cities": {"$in": [re.compile(f".*{destination}.*", re.IGNORECASE)]}}
-                ]}
+        """Khởi tạo processor với cấu hình AI và dữ liệu giá tour."""
+        genai.configure(api_key=Config.GEMINI_API_KEY)
+        self.model = genai.GenerativeModel('gemini-2.0-flash')
+        self.tour_pricing = self._load_tour_pricing_data()
+        self.default_days = 5
+        self.default_pax = 4
+
+    def _load_tour_pricing_data(self):
+        """Tải dữ liệu giá tour được cấu trúc với các khu vực và mức giá."""
+        return {
+            "asia_high": ["nhật bản|nhật|japan", "hàn quốc|hàn|korea"],
+            "asia_low": ["thái lan|thailand|singapore|malaysia|indonesia|việt nam|philippines|campuchia|lào|myanmar"],
+            "europe": ["châu âu|pháp|italy|đức|hà lan|spain|bồ đào nha|thụy sĩ|áo|paris|london|uk|england|scotland|ireland"],
+            "oceania": ["úc|australia|new zealand|nz|oceania"],
+            "america": ["mỹ|usa|hawaii|los angeles|new york|las vegas|san francisco|canada"],
+            "pricing": {
+                "asia_high": [
+                    {"pax": (2, 3), "base_price": 420, "long_tour": {"days": 5, "discount": 0.05}, "no_meal": -40},
+                    {"pax": (4, 6), "base_price": 380, "long_tour": {"days": 5, "discount": 0.05}, "no_meal": -40},
+                    {"pax": (7, 10), "base_price": 330, "long_tour": {"days": 5, "discount": 0.04}, "no_meal": -40},
+                    {"pax": (11, 16), "base_price": 290, "long_tour": {"days": 6, "discount": 0.03}, "no_meal": -40}
+                ],
+                "asia_low": [
+                    {"pax": (2, 3), "base_price": 300, "long_tour": {"days": 5, "discount": 0.05}, "no_meal": -35},
+                    {"pax": (4, 6), "base_price": 260, "long_tour": {"days": 5, "discount": 0.05}, "no_meal": -35},
+                    {"pax": (7, 10), "base_price": 220, "long_tour": {"days": 5, "discount": 0.05}, "no_meal": -30},
+                    {"pax": (11, 16), "base_price": 200, "long_tour": {"days": 6, "discount": 0.05}, "no_meal": -30}
+                ],
+                "europe": [
+                    {"pax": (2, 3), "base_price": 450, "long_tour": {"days": 7, "discount": 0.04}, "no_meal": -60},
+                    {"pax": (4, 6), "base_price": 430, "long_tour": {"days": 7, "discount": 0.04}, "no_meal": -60},
+                    {"pax": (7, 10), "base_price": 400, "long_tour": {"days": 7, "discount": 0.04}, "no_meal": -55},
+                    {"pax": (11, 16), "base_price": 380, "long_tour": {"days": 8, "discount": 0.03}, "no_meal": -55}
+                ],
+                "oceania": [
+                    {"pax": (2, 3), "base_price": 450, "long_tour": {"days": 7, "discount": 0.04}, "no_meal": -60},
+                    {"pax": (4, 6), "base_price": 430, "long_tour": {"days": 7, "discount": 0.04}, "no_meal": -60},
+                    {"pax": (7, 10), "base_price": 400, "long_tour": {"days": 7, "discount": 0.04}, "no_meal": -55},
+                    {"pax": (11, 16), "base_price": 380, "long_tour": {"days": 8, "discount": 0.03}, "no_meal": -55}
+                ],
+                "america": [
+                    {"pax": (2, 3), "base_price": 480, "long_tour": {"days": 7, "discount": 0.04}, "no_meal": -80},
+                    {"pax": (4, 6), "base_price": 460, "long_tour": {"days": 7, "discount": 0.04}, "no_meal": -80},
+                    {"pax": (7, 10), "base_price": 420, "long_tour": {"days": 7, "discount": 0.04}, "no_meal": -70},
+                    {"pax": (11, 16), "base_price": 380, "long_tour": {"days": 8, "discount": 0.03}, "no_meal": -60}
+                ]
+            },
+            "default_services": ["xe riêng", "khách sạn 3-4*", "HDV", "ăn sáng + 2 bữa chính", "vé tham quan", "visa", "bảo hiểm", "eSIM"]
+        }
+
+    def _get_region_from_country(self, country):
+        """Xác định khu vực dựa trên quốc gia."""
+        if not country:
+            return "asia_high"
+        country = country.lower().strip()
+        for region, countries in self.tour_pricing.items():
+            if region in ["pricing", "default_services"]:
+                continue
+            for country_group in countries:
+                if any(keyword in country for keyword in country_group.split('|')):
+                    return region
+        return "asia_high"
+
+    async def _analyze_conversation(self, user_query, user_id):
+        """Phân tích hội thoại bằng AI với tối ưu hóa context."""
+        try:
+            context_key = f"context:{user_id}"
+            history_key = f"history:{user_id}"
+            current_context = json.loads(redis_client.get(context_key) or '{}')
+            history = json.loads(redis_client.get(history_key) or '[]')[-5:]
+
+            history_text = "\n".join(f"{'Khách' if h.startswith('User:') else 'Bot'}: {h[5:].strip() if h.startswith('User:') else h[4:].strip()}" for h in history)
+            prompt = (
+                f"Bạn là trợ lý AI phân tích hội thoại du lịch bằng tiếng Việt.\n\n"
+                f"**Lịch sử hội thoại:**\n{history_text}\n\n"
+                f"**Context hiện tại:**\n{json.dumps(current_context, ensure_ascii=False)}\n\n"
+                f"**Tin nhắn mới:**\n{user_query}\n\n"
+                "**Nhiệm vụ:**\n"
+                "1. Tích hợp thông tin từ lịch sử và tin nhắn mới.\n"
+                "2. Hiểu các câu ngắn như '5 người', '1 tuần', 'Nhật' dựa trên ngữ cảnh.\n"
+                "3. Trả về JSON với context, intent, và response.\n\n"
+                "**Kết quả mong muốn:**\n"
+                "{{\n"
+                "  \"context\": {{ \"country\": str, \"days\": int, \"pax\": int, \"no_meal\": bool, \"upgrade_hotel\": bool, \"phone\": str, \"reset\": bool }},\n"
+                "  \"intent\": {{ \"request_price\": bool, \"consultation\": bool, \"confirmation\": bool }},\n"
+                "  \"ready_for_price\": bool,\n"
+                "  \"response\": str\n"
+                "}}\n"
             )
-            
-            if location:
-                query["destination"] = location["_id"]
-            else:
-                # Nếu không tìm thấy location, tìm theo tên tour
-                query["name"] = {"$regex": f".*{destination}.*", "$options": "i"}
-                
-        # Tìm theo khoảng giá
-        if "price_min" in kwargs and "price_max" in kwargs:
-            query["price"] = {
-                "$gte": kwargs["price_min"],
-                "$lte": kwargs["price_max"]
+
+            response = self.model.generate_content(prompt).text.strip()
+            result = json.loads(response.replace("```json", "").replace("```", ""))
+
+            new_context = result.get("context", {})
+            for key, value in new_context.items():
+                if value is not None or key not in current_context:
+                    current_context[key] = value
+
+            redis_client.set(context_key, json.dumps(current_context))
+            history.append(f"User: {user_query}")
+            redis_client.set(history_key, json.dumps(history[-5:]))
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in _analyze_conversation: {e}")
+            return {
+                "context": current_context,
+                "intent": {"request_price": False, "consultation": True, "confirmation": False},
+                "ready_for_price": False,
+                "response": "Xin lỗi, hệ thống gặp lỗi. Anh/chị vui lòng thử lại nhé!"
             }
-        elif "price_min" in kwargs:
-            query["price"] = {"$gte": kwargs["price_min"]}
-        elif "price_max" in kwargs:
-            query["price"] = {"$lte": kwargs["price_max"]}
-            
-        # Tìm theo thời gian
-        if "duration" in kwargs:
-            query["duration"] = {"$regex": kwargs["duration"], "$options": "i"}
-            
-        # Thực hiện truy vấn
-        tours = list(db.tours.find(query))
-        
-        # Thêm thông tin tên điểm đến
-        for tour in tours:
-            if "destination" in tour and isinstance(tour["destination"], ObjectId):
-                location = db.locations.find_one({"_id": tour["destination"]})
-                if location:
-                    tour["destination_name"] = location["name"]
-            elif "destination" in tour and isinstance(tour["destination"], list):
-                # Xử lý trường hợp tour có nhiều điểm đến
-                destination_names = []
-                for dest_id in tour["destination"]:
-                    if isinstance(dest_id, ObjectId):
-                        location = db.locations.find_one({"_id": dest_id})
-                        if location:
-                            destination_names.append(location["name"])
-                if destination_names:
-                    tour["destination_names"] = destination_names
-                    
-        return tours
-        
-    def get_tour_by_id(self, tour_id):
-        """Lấy thông tin chi tiết của một tour"""
-        try:
-            if isinstance(tour_id, str):
-                tour_id = ObjectId(tour_id)
-                
-            tour = db.tours.find_one({"_id": tour_id})
-            
-            if not tour:
-                return None
-                
-            # Thêm thông tin tên điểm đến
-            if "destination" in tour and isinstance(tour["destination"], ObjectId):
-                location = db.locations.find_one({"_id": tour["destination"]})
-                if location:
-                    tour["destination_name"] = location["name"]
-                    
-            return tour
-        except Exception as e:
-            print(f"Error getting tour by id: {e}")
-            return None
-            
-    def get_recommended_tours(self, limit=5):
-        """Lấy danh sách tour đề xuất"""
-        # Lấy các tour có giá tốt nhất
-        tours = list(db.tours.find().sort("price", 1).limit(limit))
-        
-        # Thêm thông tin tên điểm đến
-        for tour in tours:
-            if "destination" in tour and isinstance(tour["destination"], ObjectId):
-                location = db.locations.find_one({"_id": tour["destination"]})
-                if location:
-                    tour["destination_name"] = location["name"]
-                    
-        return tours
-        
-    def format_tour_detail(self, tour):
-        """Định dạng thông tin chi tiết tour thành tin nhắn văn bản"""
-        if not tour:
-            return "Không tìm thấy thông tin tour."
-            
-        message = f"🚌 {tour['name'].upper()}\n\n"
-        
-        if "destination_name" in tour:
-            message += f"📍 Điểm đến: {tour['destination_name']}\n"
-        elif "destination_names" in tour:
-            message += f"📍 Điểm đến: {', '.join(tour['destination_names'])}\n"
-            
-        message += f"⏱️ Thời gian: {tour['duration']}\n"
-        
-        # Định dạng giá tiền
-        price_formatted = "{:,.0f}".format(tour['price']).replace(",", ".")
-        message += f"💰 Giá: {price_formatted} VNĐ/khách\n\n"
-        
-        # Thêm mô tả
-        message += f"🌟 {tour['description']}\n\n"
-        
-        # Thêm lịch khởi hành
-        if "departure_dates" in tour and tour["departure_dates"]:
-            message += "🗓️ Lịch khởi hành:\n"
-            for i, date in enumerate(tour["departure_dates"][:3], 1):
-                if isinstance(date, datetime):
-                    date_str = date.strftime("%d/%m/%Y")
-                else:
-                    date_str = str(date)
-                message += f"{i}. {date_str}\n"
-            message += "\n"
-            
-        # Thêm chi tiết dịch vụ bao gồm
-        if "inclusions" in tour or tour["inclusions"]:
-            message += "✅ Dịch vụ bao gồm:\n"
-            for item in tour["inclusions"]:
-                message += f"• {item}\n"
-            message += "\n"
-            
-        # Thêm dịch vụ không bao gồm
-        if "exclusions" in tour or tour["exclusions"]:
-            message += "❌ Dịch vụ không bao gồm:\n"
-            for item in tour["exclusions"]:
-                message += f"• {item}\n"
-            message += "\n"
-            
-        message += "📞 Để đặt tour này, hãy nhập 'đặt tour' hoặc liên hệ hotline 1900xxxx để được tư vấn chi tiết."
-        
-        return message
-        
-    def create_tour(self, tour_data):
-        """Tạo tour mới"""
-        try:
-            result = db.tours.insert_one(tour_data)
-            return str(result.inserted_id)
-        except Exception as e:
-            print(f"Error creating tour: {e}")
-            return None
-            
-    def update_tour(self, tour_id, tour_data):
-        """Cập nhật thông tin tour"""
-        try:
-            if isinstance(tour_id, str):
-                tour_id = ObjectId(tour_id)
-                
-            result = db.tours.update_one(
-                {"_id": tour_id},
-                {"$set": tour_data}
-            )
-            
-            return result.modified_count > 0
-        except Exception as e:
-            print(f"Error updating tour: {e}")
-            return False
-            
-    def delete_tour(self, tour_id):
-        """Xóa tour"""
-        try:
-            if isinstance(tour_id, str):
-                tour_id = ObjectId(tour_id)
-                
-            result = db.tours.delete_one({"_id": tour_id})
-            return result.deleted_count > 0
-        except Exception as e:
-            print(f"Error deleting tour: {e}")
-            return False
 
-# Khởi tạo service
-tour_service = TourService()
+    def _split_message(self, message):
+        """Chia nhỏ tin nhắn nếu vượt quá giới hạn ký tự của Zalo."""
+        if len(message) <= ZALO_MESSAGE_LIMIT:
+            return [message]
+        
+        messages = []
+        lines = message.split('\n')
+        current_message = ""
+        
+        for line in lines:
+            if len(current_message) + len(line) + 1 > ZALO_MESSAGE_LIMIT:
+                if current_message:
+                    messages.append(current_message.strip())
+                current_message = line
+            else:
+                current_message += f"\n{line}" if current_message else line
+        
+        if current_message:
+            messages.append(current_message.strip())
+        
+        return messages
 
+    async def process_tour_query(self, user_id, user_query):
+        """Xử lý truy vấn của người dùng và trả về phản hồi cùng context mới."""
+        try:
+            analysis = await self._analyze_conversation(user_query, user_id)
+            context = json.loads(redis_client.get(f"context:{user_id}") or '{}')
+            
+            for key, value in analysis.get("context", {}).items():
+                if value is not None:
+                    context[key] = value
+                    
+            redis_client.set(f"context:{user_id}", json.dumps(context))
+            
+            if context.get("reset"):
+                redis_client.delete(f"context:{user_id}", f"history:{user_id}")
+                response = "Đã reset trạng thái hội thoại. Bạn có thể bắt đầu lại với một câu hỏi mới."
+                return [response], context
+                
+            if phone := context.get("phone"):
+                self._save_customer_lead(user_id, context)
+                response = f"Dạ, em đã ghi nhận SĐT {phone}. Nhân viên sẽ liên hệ anh/chị sớm ạ!"
+                return [response], context
+                
+            if context.get("country") and context.get("pax"):
+                price_info = self._calculate_tour_price(
+                    context["country"],
+                    context.get("pax", self.default_pax),
+                    context.get("days", self.default_days),
+                    context.get("no_meal", False),
+                    context.get("upgrade_hotel", False)
+                )
+                response = self._build_price_response(price_info, context)
+                messages = self._split_message(response)
+                redis_client.set(f"history:{user_id}", json.dumps(
+                    json.loads(redis_client.get(f"history:{user_id}") or '[]')[-4:] + [f"Bot: {response}"]
+                ))
+                return messages, context
+                
+            response = analysis.get("response", "Dạ, em chưa hiểu rõ yêu cầu. Anh/chị vui lòng cung cấp thêm thông tin về địa điểm, số người và số ngày đi nhé!")
+            messages = self._split_message(response)
+            redis_client.set(f"history:{user_id}", json.dumps(
+                json.loads(redis_client.get(f"history:{user_id}") or '[]')[-4:] + [f"Bot: {response}"]
+            ))
+            return messages, context
+            
+        except Exception as e:
+            logger.error(f"Error in process_tour_query: {e}")
+            response = "Dạ, em bị lỗi chút xíu. Anh/chị hỏi lại nhé!"
+            return [response], json.loads(redis_client.get(f"context:{user_id}") or '{}')
+
+    def _calculate_tour_price(self, country, pax, days, no_meal, upgrade_hotel):
+        """Tính toán giá tour dựa trên thông tin đầu vào với kiểm tra giá trị None."""
+        pax = pax if pax is not None else self.default_pax
+        days = days if days is not None else self.default_days
+        
+        region = self._get_region_from_country(country)
+        pricing = self.tour_pricing["pricing"].get(region, self.tour_pricing["pricing"]["asia_high"])
+        tier = next((t for t in pricing if t["pax"][0] <= pax <= t["pax"][1]), pricing[-1])
+        base_price = tier["base_price"]
+
+        if days >= tier["long_tour"]["days"]:
+            base_price *= (1 - tier["long_tour"]["discount"])
+
+        total_price_per_day = base_price + (tier["no_meal"] if no_meal else 0) + (40 if upgrade_hotel else 0)
+        total_price = total_price_per_day * days
+        total_price_per_pax = total_price / pax
+
+        return {
+            "total_price": total_price,
+            "total_price_per_pax": total_price_per_pax,
+            "days": days,
+            "pax": pax,
+            "region": region
+        }
+
+    def _save_customer_lead(self, user_id, context):
+        """Lưu thông tin khách hàng tiềm năng vào cơ sở dữ liệu."""
+        try:
+            from services.database import db
+            lead_data = {
+                "phone": context["phone"],
+                "zalo_user_id": user_id,
+                "source": "zalo_bot",
+                "created_at": datetime.now().isoformat(),
+                "service_type": "tour",
+                "country_interest": context.get("country", ""),
+                "description": f"{context.get('country', '')}, {context.get('days', self.default_days)} ngày, {context.get('pax', self.default_pax)} người"
+            }
+            db.get_collection("leads").insert_one(lead_data)
+            logger.info(f"Đã lưu lead: {context['phone']}")
+        except Exception as e:
+            logger.error(f"Error saving lead: {e}")
+
+    def _build_price_response(self, price_info, context):
+        """Tạo phản hồi giá tour chi tiết."""
+        total_usd = round(price_info["total_price"])
+        per_pax_usd = round(price_info["total_price_per_pax"])
+        services = self.tour_pricing["default_services"].copy()
+        if context.get("no_meal"):
+            services[services.index("ăn sáng + 2 bữa chính")] = "ăn sáng"
+        if context.get("upgrade_hotel"):
+            services[services.index("khách sạn 3-4*")] = "khách sạn 5*"
+
+        return (
+            f"Dạ, tour {context.get('country')} {price_info['days']} ngày cho {price_info['pax']} người:\n"
+            f"Giá khoảng {per_pax_usd} USD/người, tổng {total_usd} USD (chưa gồm vé máy bay).\n"
+            f"Đã bao gồm: {', '.join(services)}.\n"
+            f"Anh/chị để lại SĐT để em tư vấn chi tiết nhé!"
+        )
+
+
+tour_processor = TourPriceProcessor()

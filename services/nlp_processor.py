@@ -35,7 +35,9 @@ class NLPProcessor:
         self.patterns = {
             'TOUR_SEARCH': [
                 r'tìm tour', r'tour du lịch', r'đi du lịch', r'gói du lịch',
-                r'tour.*nước ngoài', r'tour châu', r'tour.*ưu đãi'
+                r'tour.*nước ngoài', r'tour châu', r'tour.*ưu đãi',
+                r'tour private', r'tour riêng', r'thuê xe', r'xe riêng',
+                r'hướng dẫn viên', r'du lịch.*riêng tư', r'private'
             ],
             'VISA_INFO': [
                 r'visa', r'làm visa', r'thủ tục visa', r'xin visa', 
@@ -66,6 +68,10 @@ class NLPProcessor:
             ],
             'GREETING': [
                 r'xin chào', r'hello', r'hi', r'chào', r'hey'
+            ],
+            'PRIVATE_TOUR': [
+                r'tour private', r'tour riêng', r'thuê xe riêng', r'xe riêng',
+                r'hướng dẫn viên riêng', r'du lịch tự túc', r'đi riêng'
             ]
         }
         
@@ -85,56 +91,35 @@ class NLPProcessor:
         
         return tokens
         
-    def extract_entities(self, text):
-        """Trích xuất các thực thể từ văn bản"""
+    def extract_entities(self, message):
+        """Extract entities like locations from message."""
         entities = {
-            'locations': [],
-            'dates': [],
-            'people': None,
-            'price': None
+            "locations": [],
+            "dates": [],
+            "people_count": None
         }
         
-        # Trích xuất địa điểm
-        # Giả sử chúng ta có danh sách các địa điểm trong CSDL
-        locations = list(db.locations.find({}, {"name": 1}))
-        location_names = [location["name"].lower() for location in locations]
-        
-        for location_name in location_names:
-            if location_name in text.lower():
-                entities['locations'].append(location_name)
-                
-        # Trích xuất ngày tháng
-        date_regex = r'\d{1,2}\/\d{1,2}(\/\d{2,4})?'
-        date_matches = re.findall(date_regex, text)
-        
-        if date_matches:
-            entities['dates'] = date_matches
+        # Extract locations (with error handling)
+        try:
+            locations = list(db.locations.find({}, {"name": 1}))
+            location_names = [loc["name"] for loc in locations]
             
-        # Trích xuất số người
-        people_regex = r'(\d+)\s*(người|khách|du khách|người lớn|trẻ em)'
-        people_match = re.search(people_regex, text, re.IGNORECASE)
+            # Rest of your location extraction code
+            for word in message.lower().split():
+                if word in location_names:
+                    entities["locations"].append(word)
+        except Exception as e:
+            import logging
+            logging.warning(f"Could not access locations collection: {str(e)}. Using fallback method.")
+            # Fallback method - hardcoded popular locations
+            common_locations = ["nhật bản", "hàn quốc", "thái lan", "singapore", "mỹ", "pháp"]
+            for location in common_locations:
+                if location in message.lower():
+                    entities["locations"].append(location)
         
-        if people_match:
-            entities['people'] = int(people_match.group(1))
-            
-        # Trích xuất giá cả
-        price_regex = r'(dưới|trên|khoảng)?\s*(\d+)\s*(triệu|nghìn|k|tr)'
-        price_match = re.search(price_regex, text, re.IGNORECASE)
+        # Extract dates 
+        # ... rest of your existing code ...
         
-        if price_match:
-            price = int(price_match.group(2))
-            unit = price_match.group(3).lower()
-            
-            if unit == 'tr' or unit == 'triệu':
-                price *= 1000000
-            elif unit == 'k' or unit == 'nghìn':
-                price *= 1000
-                
-            entities['price'] = {
-                'value': price,
-                'condition': price_match.group(1) or 'khoảng'
-            }
-            
         return entities
         
     def classify_intent(self, text):
@@ -159,3 +144,6 @@ class NLPProcessor:
             "entities": entities,
             "original_message": message
         }
+    
+
+nlp_processor = NLPProcessor()

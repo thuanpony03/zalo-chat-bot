@@ -1,0 +1,12 @@
+{
+    "mỹ|canada": [
+        {"pax": [3, 4], "base_price_short": 480.00, "long_price_discount_percentage": 4.0, "no_meal_discount": -80.00, "guide_fee": 300.00, "note": "Tài xế kiêm HDV"},
+        {"pax": [5, 6], "base_price_short": 460.00, "long_price_discount_percentage": 4.0, "no_meal_discount": -80.00, "guide_fee": 300.00, "note": "Tài xế kiêm HDV"},
+        {"pax": [7, 10], "base_price_short": 420.00, "long_price_discount_percentage": 4.0, "no_meal_discount": -70.00, "guide_fee": 320.00, "note": "Tài xế + HDV"},
+        {"pax": [11, 16], "base_price_short": 380.00, "long_price_discount_percentage": 3.0, "no_meal_discount": -60.00, "guide_fee": 340.00, "note": "Tài xế + HDV"}
+    ],
+    "nhật bản|hàn quốc": [
+        {"pax": [3, 4], "base_price_short": 400.00, "long_price_discount_percentage": 5.0, "no_meal_discount": -40.00, "guide_fee": 150.00, "note": "Tài xế kiêm HDV"},
+        {"pax": [5, 6], "base_price_short": 360.00, "long_price_discount_percentage": 5.0, "no_meal_discount": -40.00, "guide_fee": 150.00, "note": "Tài xế + HDV"}
+    ]
+}

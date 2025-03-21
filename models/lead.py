@@ -7,7 +7,7 @@ class Lead(BaseModel):
     def __init__(self, name=None, phone=None, email=None, country_interest=None, 
                  zalo_user_id=None, source="zalo_bot", status="new_lead",
                  customer_needs=None, special_concerns=False, special_case_type=None,
-                 original_query=None):
+                 original_query=None, description=None):
         super().__init__()
         self.name = name
         self.phone = phone
@@ -20,6 +20,7 @@ class Lead(BaseModel):
         self.special_concerns = special_concerns
         self.special_case_type = special_case_type
         self.original_query = original_query
+        self.description = description  # Add this line
         self.assigned_to = None
         self.notes = []
         self.last_contact_date = None
@@ -50,7 +51,8 @@ class Lead(BaseModel):
             customer_needs=data.get("customer_needs", []),
             special_concerns=data.get("special_concerns", False),
             special_case_type=data.get("special_case_type"),
-            original_query=data.get("original_query")
+            original_query=data.get("original_query"),
+            description=data.get("description")  # Add this line
         )
         
         lead._id = data.get("_id", ObjectId())
