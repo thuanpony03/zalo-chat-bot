@@ -104,7 +104,17 @@ class MessageHandler:
             
             # Xử lý dựa trên intent
             if intent == "visa":
-                responses = await self._handle_visa_query(combined_text, user_id)
+                response = await self._handle_visa_query(combined_text, user_id)
+                
+                # Kiểm tra kiểu phản hồi trước khi xử lý
+                if isinstance(response, dict) and response.get("type") == "multi_part":
+                    # Xử lý tin nhắn nhiều phần - CHỈ gửi qua hàm _send_multi_part_response
+                    await self._send_multi_part_response(user_id, response.get("messages", []))
+                    # QUAN TRỌNG: Không thực hiện thêm bất kỳ xử lý nào với response sau khi gửi
+                    return  # Kết thúc hàm ở đây để tránh xử lý thêm
+                else:
+                    # Xử lý tin nhắn đơn như trước
+                    await self._send_response(user_id, response if response else ["Dạ, em chưa hiểu rõ yêu cầu. Anh/chị vui lòng cung cấp thêm thông tin nhé!"])
             else:  # intent == "tour" hoặc khác
                 if any(keyword in combined_text.lower() for keyword in detailed_itinerary_keywords) and context.get("country"):
                     # Xử lý yêu cầu lịch trình chi tiết
@@ -222,13 +232,22 @@ class MessageHandler:
             # Cập nhật context mới vào Redis
             redis_client.set(f"context:{user_id}", json.dumps(new_context))
             
-            # Lưu vào lịch sử
+            # Lưu vào lịch sử nếu là phản hồi đơn
             history = json.loads(redis_client.get(f"history:{user_id}") or '[]')
             history.append(f"User: {text}")
-            history.append(f"Bot: {response}")
-            redis_client.set(f"history:{user_id}", json.dumps(history[-10:]))  # Giữ 10 tin nhắn gần nhất
             
-            return [response]
+            if isinstance(response, dict) and response.get("type") == "multi_part":
+                # Nếu là phản hồi nhiều phần, ghép lại để lưu vào lịch sử
+                combined_response = " ".join(response.get("messages", []))
+                history.append(f"Bot: {combined_response}")
+                redis_client.set(f"history:{user_id}", json.dumps(history[-10:]))
+                return response
+            else:
+                # Nếu là phản hồi đơn lẻ
+                history.append(f"Bot: {response}")
+                redis_client.set(f"history:{user_id}", json.dumps(history[-10:]))
+                return [response]
+            
         except Exception as e:
             logger.error(f"Lỗi khi xử lý visa query: {e}")
             traceback.print_exc()
@@ -249,6 +268,21 @@ class MessageHandler:
                     await asyncio.sleep(1)  # Đợi 1 giây giữa các tin nhắn bất đồng bộ
                 except Exception as e:
                     logger.error(f"Error sending message '{msg.strip()}': {e}")
+
+    # Thêm hàm mới để xử lý tin nhắn nhiều phần
+    async def _send_multi_part_response(self, user_id, messages):
+        """Gửi nhiều tin nhắn liên tiếp với khoảng cách thời gian."""
+        if not messages:
+            return
+            
+        for msg in messages:
+            if msg and isinstance(msg, str) and msg.strip():
+                try:
+                    result = self.zalo_api.send_text_message(user_id, msg.strip())
+                    logger.info(f"Sent part response to {user_id}: {msg.strip()} - Result: {result}")
+                    await asyncio.sleep(0.8)  # Đợi 0.8 giây giữa các tin nhắn
+                except Exception as e:
+                    logger.error(f"Error sending part message: {e}")
 
 message_handler = MessageHandler()
 

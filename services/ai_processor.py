@@ -129,9 +129,12 @@ class AIProcessor:
             if stay_duration:
                 context_to_return['stay_duration'] = stay_duration
 
-            # Cập nhật phát hiện quốc gia với xử lý ngữ cảnh tốt hơn
-            potential_country = self._extract_country_from_query(user_query)
-            if potential_country and self._is_valid_country_detection(potential_country, user_query):
+            # Cập nhật phát hiện quốc gia với AI
+            logger.info(f"Đang xử lý query: '{user_query}'")
+            potential_country = await self._extract_country_with_ai(user_query)
+            logger.info(f"Phát hiện quốc gia bằng AI: '{potential_country}'")
+
+            if potential_country:
                 context_to_return['country'] = potential_country
                 logger.info(f"Quốc gia mới từ câu hỏi: {potential_country}")
                 if potential_country.lower() not in self.visa_data:
@@ -163,8 +166,18 @@ class AIProcessor:
                         context_str += f"{role}: {msg['message']}\n"
 
             prompt = self._build_visa_prompt(user_query, visa_info, context_str, context_to_return)
-            response = await self._generate_response(prompt)
-            return response, context_to_return
+            
+            # THAY ĐỔI Ở ĐÂY
+            raw_response = await self._generate_response(prompt)
+            
+            # Xử lý phản hồi dài
+            if len(raw_response) > 160:
+                # Phản hồi quá dài, trả về một mảng
+                response_parts = self._split_message(raw_response)
+                return {"type": "multi_part", "messages": response_parts}, context_to_return
+            else:
+                # Phản hồi ngắn, trả về một chuỗi đơn như trước
+                return raw_response, context_to_return
 
         except Exception as e:
             logger.error(f"Lỗi trong process_visa_query: {e}", exc_info=True)
@@ -367,6 +380,7 @@ class AIProcessor:
                     if potential_name and 2 <= len(potential_name) <= 30:
                         return potential_name
         return None
+    
 
     def _extract_country_from_query(self, query):
         """Extract country from the user's query with more strict validation."""
@@ -459,6 +473,23 @@ class AIProcessor:
         """Validate if a country detection is likely correct and not a false positive."""
         query_lower = query.lower()
         
+        # Nếu query bắt đầu bằng "visa" hoặc "giá visa" và tiếp theo là tên quốc gia
+        # thì xác định đây là hỏi về visa của quốc gia đó
+        visa_patterns = [
+            f"visa {detected_country.lower()}",
+            f"giá visa {detected_country.lower()}",
+            f"chi phí visa {detected_country.lower()}"
+        ]
+        
+        if any(pattern in query_lower for pattern in visa_patterns):
+            # Nếu query có dạng "visa <tên quốc gia>" hoặc "giá visa <tên quốc gia>"
+            # thì ưu tiên xác định đây là query về quốc gia, bất kể từ "anh" có xuất hiện
+            # trong các từ ambiguous không
+            logger.info(f"Phát hiện hợp lệ: '{detected_country}' trong pattern '{[p for p in visa_patterns if p in query_lower]}'")
+            return True
+        
+        # Giữ lại code hiện tại để kiểm tra các trường hợp khác...
+        
         # Các từ có thể gây hiểu nhầm
         ambiguous_words = {
             "ý định", "ý nghĩa", "ý là", "ý ạ", "ý nhé", 
@@ -545,6 +576,7 @@ class AIProcessor:
                         break
         elif "family_travel" in context and context["family_travel"]:
             best_visa = min(visas, key=lambda v: v.get("price", float('inf')))
+        logger.info(f"Selected visa for {country}: {best_visa.get('price')} USD")
         return best_visa
 
     def _convert_duration_to_days(self, duration_str):
@@ -585,29 +617,62 @@ class AIProcessor:
             return "Xin lỗi, tôi không thể trả lời vào lúc này. Vui lòng gọi 1900 636563 để được hỗ trợ."
 
     def _build_visa_prompt(self, query, visa_info, context_str="", user_context=None):
-        """Build an effective prompt for visa queries."""
+        """Build an effective prompt for visa queries with optimized price range."""
         prompt = (
             "Bạn là tư vấn viên visa chuyên nghiệp tại Passport Lounge với giọng điệu tự nhiên giống người, lịch sự và thân thiện.\n"
             "CẢNH BÁO QUAN TRỌNG: Phản hồi của bạn PHẢI NGẮN GỌN (tối đa 4-5 câu, khoảng 300-400 ký tự).\n"
             "KHÔNG liệt kê chi tiết giấy tờ hay quy trình cụ thể.\n"
             "Giọng điệu thân thiện, đồng cảm và tự nhiên.\n"
-            "Khi nói về giá, LUÔN sử dụng khoảng giá (ví dụ: 'khoảng 3-4 triệu') thay vì số chính xác.\n"
+            "Khi nói về giá, LUÔN sử dụng khoảng giá hợp lý (ví dụ: 'khoảng 7-8 triệu') thay vì số chính xác.\n"
         )
         if context_str:
             prompt += f"\nNgữ cảnh cuộc hội thoại:\n{context_str}\n"
 
         if visa_info:
-            country_name = visa_info.get('country', '')
+            country_name = visa_info.get('country', '').lower()
             prompt += f"\nDữ liệu sản phẩm visa {country_name}:\n"
             prompt += f"- Loại visa: {visa_info.get('visa_type', '')} {visa_info.get('visa_method', '')}\n"
-            price = visa_info.get('price', '')
-            discounted_price = int(price * 0.92) if price else 0
-            price_vnd = int(price * 25000) if price else 0
-            discounted_price_vnd = int(discounted_price * 25000) if discounted_price else 0
-            price_range_low = int(discounted_price_vnd * 0.9 / 1000000)
-            price_range_high = int(discounted_price_vnd * 1.1 / 1000000)
-            prompt += f"- Giá thật: ${price} USD (khoảng {price_vnd:,} VND)\n"
-            prompt += f"- Giá báo khách: khoảng {price_range_low}-{price_range_high} triệu VND\n"
+            
+            # Tính toán giá với range hợp lý
+            price = visa_info.get('price', 0)
+            if price:
+                price_vnd = int(price * 25000)  # Tỷ giá 25,000 VND/USD
+                price_million = price_vnd / 1000000  # Quy đổi sang triệu VND
+
+                # Phân loại quốc gia và tính range giá hợp lý
+                premium_countries = ['mỹ', 'anh quốc', 'canada', 'úc', 'new zealand']
+                schengen_countries = ['đức (visa schengen)', 'ý (visa schengen)', 'pháp (visa schengen)', 
+                                    'tây ban nha (visa schengen)', 'thụy sĩ (visa schengen)', 
+                                    'thụy điển (visa schengen)', 'ch séc (visa schengen)', 
+                                    'phần lan (visa schengen)', 'na uy (visa schengen)', 
+                                    'hy lạp (visa schengen)', 'hà lan (visa schengen)', 
+                                    'đan mạch (visa schengen)', 'bồ đào nha (visa schengen)', 
+                                    'bỉ (visa schengen)', 'áo (visa schengen)']
+
+                if country_name in premium_countries:
+                    # Nhóm cao cấp: range ±15% (không quá rộng, hợp lý)
+                    price_range_low = round(price_million * 0.85, 1)
+                    price_range_high = round(price_million * 1.15, 1)
+                elif country_name in schengen_countries:
+                    # Nhóm Schengen: range ±10% (hẹp hơn vì giá đồng nhất)
+                    price_range_low = round(price_million * 0.9, 1)
+                    price_range_high = round(price_million * 1.1, 1)
+                else:
+                    # Nhóm khác: range ±12% (trung bình, tối ưu)
+                    price_range_low = round(price_million * 0.88, 1)
+                    price_range_high = round(price_million * 1.12, 1)
+
+                # Điều chỉnh để range không quá rộng (tối đa chênh 2 triệu)
+                if price_range_high - price_range_low > 2:
+                    price_range_high = price_range_low + 2
+
+                # Đảm bảo range hợp lý (ít nhất chênh 0.5 triệu)
+                if price_range_high - price_range_low < 0.5:
+                    price_range_high = price_range_low + 0.5
+
+                prompt += f"- Giá thật: ${price} USD (khoảng {price_vnd:,} VND)\n"
+                prompt += f"- Giá báo khách: khoảng {price_range_low}-{price_range_high} triệu VND\n"
+            
             prompt += f"- Thời gian xử lý: {visa_info.get('processing_time', '')}\n"
         else:
             prompt += (
@@ -631,7 +696,7 @@ class AIProcessor:
             "- Trả lời với độ dài vừa đủ (4-5 câu ngắn) để cung cấp thông tin hữu ích.\n"
             "- Thể hiện sự hiểu biết chuyên sâu và đồng cảm với khách hàng.\n"
             "- Trả lời cụ thể nhưng không đi vào chi tiết kỹ thuật.\n"
-            "- Khi được hỏi về giá, LUÔN đưa ra khoảng giá (không nêu số chính xác).\n"
+            "- Khi được hỏi về giá, LUÔN đưa ra khoảng giá hợp lý dựa trên dữ liệu.\n"
             "- THƯỜNG XUYÊN KẾT THÚC các câu trả lời bằng câu hỏi đơn giản như "
             "'Anh/chị còn thắc mắc gì nữa không?' hoặc 'Anh/chị quan tâm đến điều gì khác không?'\n"
             "\nHƯỚNG DẪN VỀ LIÊN HỆ:\n"
@@ -685,5 +750,160 @@ class AIProcessor:
             "cuối tháng", "gấp rút", "express", "cấp tốc"
         ]
         return any(pattern in query for pattern in special_concern_patterns)
+
+    async def _extract_country_with_ai(self, query):
+        """Sử dụng AI để nhận diện quốc gia từ câu hỏi với cải tiến xử lý tin nhắn."""
+        if not query:
+            return None
+        
+        # Phát hiện quốc gia bằng pattern trước (nhanh hơn)
+        country_from_pattern = self._extract_country_from_query(query)
+        if country_from_pattern:
+            logger.info(f"Phát hiện quốc gia từ pattern: '{country_from_pattern}'")
+            return country_from_pattern
+        
+        # Nếu không tìm được bằng pattern, sử dụng AI
+        prompt = (
+            "Nhiệm vụ: Xác định quốc gia được đề cập trong câu hỏi về visa dưới đây.\n"
+            "Nếu có quốc gia, trả về TÊN QUỐC GIA chính xác (tiếng Việt). "
+            "Nếu không có quốc gia nào được đề cập, trả về NONE.\n\n"
+            f"Câu hỏi: {query}\n\n"
+            "Chỉ trả lời TÊN QUỐC GIA hoặc NONE, không có giải thích thêm.\n\n"
+            "LƯU Ý ĐẶC BIỆT: Từ 'anh', 'ý' có thể là quốc gia hoặc từ khác tùy ngữ cảnh.\n"
+            "- Nếu 'anh' là đại từ nhân xưng (anh ấy, anh trai...) -> NONE\n"
+            "- Nếu 'anh' là quốc gia (visa anh, đi anh...) -> 'anh quốc'\n"
+            "- Nếu 'ý' là danh từ (ý kiến, ý định...) -> NONE\n"
+            "- Nếu 'ý' là quốc gia (visa ý, đi ý...) -> 'ý'\n\n"
+            "Ví dụ:\n"
+            "Câu: 'Tôi muốn làm visa đi Pháp' → 'pháp'\n"
+            "Câu: 'Giá visa Mỹ bao nhiêu?' → 'mỹ'\n"
+            "Câu: 'Anh có thể tư vấn về visa không?' → 'NONE'\n"
+            "Câu: 'Tôi muốn visa Anh' → 'anh quốc'\n"
+            "Câu: 'Tôi có ý định xin visa Ý' → 'ý'\n"
+        )
+        
+        try:
+            # Gửi prompt tới Gemini API
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, lambda: self.model.generate_content(prompt))
+            result = response.text.strip().lower()
+            
+            # Loại bỏ dấu câu và ký tự thừa
+            result = re.sub(r'[.,;:"\']', '', result)
+            
+            # Xử lý phản hồi
+            logger.info(f"AI nhận diện quốc gia từ '{query}': '{result}'")
+            
+            if result == "none" or not result:
+                return None
+                
+            # Chuẩn hóa tên quốc gia
+            return self._standardize_country_name(result)
+            
+        except Exception as e:
+            logger.error(f"Lỗi khi sử dụng AI để nhận diện quốc gia: {e}")
+            return None
+
+    def _standardize_country_name(self, country_name):
+        """Chuẩn hóa tên quốc gia."""
+        # Ánh xạ tên quốc gia cơ bản
+        country_mapping = {
+            "mỹ": "mỹ", "usa": "mỹ", "hoa kỳ": "mỹ",
+            "anh": "anh quốc", "england": "anh quốc", "uk": "anh quốc", "vương quốc anh": "anh quốc",
+            "nhật": "nhật bản", "japan": "nhật bản",
+            "hàn": "hàn quốc", "hàn quốc": "hàn quốc", "korea": "hàn quốc",
+            "úc": "úc", "australia": "úc"
+        }
+        
+        country_name = country_name.lower().strip()
+        return country_mapping.get(country_name, country_name)
+
+    def _split_message(self, message):
+        """Chia nhỏ tin nhắn nếu vượt quá giới hạn ký tự của Zalo."""
+        ZALO_MESSAGE_LIMIT = 160  # Giới hạn ký tự Zalo
+        
+        if len(message) <= ZALO_MESSAGE_LIMIT:
+            return [message]
+        
+        messages = []
+        lines = message.split('\n')
+        current_message = ""
+        
+        for line in lines:
+            if len(current_message) + len(line) + 1 > ZALO_MESSAGE_LIMIT:
+                if current_message:
+                    messages.append(current_message.strip())
+                current_message = line
+            else:
+                current_message += f"\n{line}" if current_message else line
+        
+        if current_message:
+            messages.append(current_message.strip())
+        
+        return messages
+
+    async def _generate_and_format_response(self, prompt, context):
+        """Tạo phản hồi và định dạng phù hợp."""
+        raw_response = await self._generate_response(prompt)
+        
+        # Thêm tag quốc gia nếu có
+        if context.get('country'):
+            country = context.get('country')
+            if not re.search(rf'\b{re.escape(country)}\b', raw_response, re.IGNORECASE):
+                # Thêm tên quốc gia vào đầu câu trả lời nếu chưa có
+                raw_response = f"Về visa {country}, {raw_response[0].lower()}{raw_response[1:]}"
+        
+        # Thêm tagline dịch vụ nếu phản hồi quá ngắn
+        if len(raw_response) < 100 and "số điện thoại" not in raw_response.lower():
+            raw_response += " Anh/chị vui lòng để lại số điện thoại để tư vấn viên liên hệ hỗ trợ chi tiết nhé!"
+        
+        return raw_response, context
+
+    def _is_country_reference(self, query, word):
+        """Xác định chắc chắn từ 'anh' hoặc 'ý' là quốc gia."""
+        query_lower = query.lower()
+        
+        # Các pattern chỉ rõ là quốc gia
+        country_patterns = [
+            rf"visa\s+{word}",
+            rf"đi\s+{word}",
+            rf"{word}\s+quốc",
+            rf"du lịch\s+{word}",
+            rf"phí\s+{word}",
+            rf"giá\s+visa\s+{word}"
+        ]
+        
+        # Nếu match bất kỳ pattern nào, đó là quốc gia
+        for pattern in country_patterns:
+            if re.search(pattern, query_lower):
+                return True
+        
+        # Các pattern chỉ rõ KHÔNG phải quốc gia
+        if word == "anh":
+            non_country_patterns = [
+                r"anh\s+chị", r"của\s+anh", r"anh\s+có", r"anh\s+ơi", 
+                r"anh\s+nhé", r"anh\s+ạ", r"anh\s+[a-zà-ỹ]+"
+            ]
+        else:  # word == "ý"
+            non_country_patterns = [
+                r"ý\s+kiến", r"ý\s+định", r"ý\s+nghĩa", r"ý\s+là", 
+                r"có\s+ý", r"theo\s+ý", r"ý\s+tưởng"
+            ]
+        
+        # Nếu match bất kỳ pattern phi quốc gia, chắc chắn không phải quốc gia
+        for pattern in non_country_patterns:
+            if re.search(pattern, query_lower):
+                return False
+        
+        # Kiểm tra ngữ cảnh từ
+        words = query_lower.split()
+        if word in words:
+            idx = words.index(word)
+            # Từ đứng ngay sau visa có khả năng cao là quốc gia
+            if idx > 0 and words[idx-1] == "visa":
+                return True
+        
+        # Mặc định: không chắc chắn
+        return None
 
 ai_processor = AIProcessor()
